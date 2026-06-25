@@ -82,13 +82,14 @@ jobs:
           ignore-unfixed: true
           exit-code: "1"
 
+  # NOTE: CodeQL needs a read/write token to upload results. We do NOT declare
+  # `permissions:` here, because requesting more than the repo's default token is
+  # validated at workflow STARTUP (before `if:`) and would fail every run on a
+  # read-only repo. To use CodeQL: set the repo's default workflow permissions to
+  # "Read and write" (Settings → Actions → General), then set enable_codeql: true.
   sast:
     if: ${{ inputs.enable_codeql }}
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      security-events: write     # CodeQL needs this; enabling it also requires
-                                 # the repo's default workflow token to allow writes
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
