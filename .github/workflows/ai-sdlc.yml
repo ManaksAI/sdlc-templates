@@ -1,0 +1,103 @@
+name: AI SDLC
+
+# Autonomous requirement → analysis → (gate) → implementation PR.
+#
+# Triggered (by the caller) when a requirement is filed as an issue. Flow:
+#   1. triage:    Claude analyzes the requirement, posts an analysis comment,
+#                 and DECIDES whether a human must review first.
+#   2. implement: only if no human review is needed — Claude (via the Claude Code
+#                 Action) branches, makes the change, writes & runs tests (`make ci`),
+#                 fixes failures, and opens a PR. It NEVER merges and NEVER deploys.
+#
+# Human gates (the "alert and stop" points you asked for):
+#   • triage decides human review is needed  → label `needs-human`, comment, STOP.
+#   • implement gets blocked / ci won't pass  → comment, label `needs-human`, no PR.
+#   • PR review + merge to main               → always a human.
+#   • deploy (tag a release)                  → always a human.
+#
+# PREREQUISITES on the caller repo:
+#   • secret ANTHROPIC_API_KEY  (passed via `secrets: inherit`)
+#   • default workflow token = "Read and write" (this workflow needs write to
+#     branch/comment/PR; a read-only token fails at startup).
+
+on:
+  workflow_call:
+    inputs:
+      auto_implement:
+        description: "Proceed to an autonomous implementation PR when no human review is required"
+        type: boolean
+        default: true
+      model:
+        type: string
+        default: "claude-opus-4-8"
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+
+jobs:
+  # ───────────── 1. ANALYZE + decide if a human is needed ─────────────
+  triage:
+    runs-on: ubuntu-latest
+    outputs:
+      proceed: ${{ steps.analyze.outputs.proceed }}
+    steps:
+      - uses: actions/checkout@v4          # the caller repo (so triage sees its code)
+        with:
+          fetch-depth: 0
+      - uses: actions/checkout@v4          # the templates repo (for the triage script)
+        with:
+          repository: manaksu/sdlc-templates
+          ref: v1
+          path: .sdlc
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -q anthropic
+      - id: analyze
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          MODEL: ${{ inputs.model }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+          ISSUE_LABELS: ${{ toJson(github.event.issue.labels.*.name) }}
+        run: python .sdlc/scripts/triage.py
+
+  # ───────────── 2. IMPLEMENT autonomously (only if the gate is open) ─────────────
+  implement:
+    needs: triage
+    if: ${{ inputs.auto_implement && needs.triage.outputs.proceed == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: "--model ${{ inputs.model }}"
+          prompt: |
+            You are the implementation stage of an automated SDLC pipeline for
+            issue #${{ github.event.issue.number }} in ${{ github.repository }}.
+            First read that issue AND its "Automated analysis" comment.
+
+            Do, in order:
+            1. Create a branch named `ai/issue-${{ github.event.issue.number }}`.
+            2. Implement the smallest change that satisfies the acceptance criteria
+               in the analysis. Keep it scoped — no unrelated refactors.
+            3. Add or update tests that cover the change.
+            4. Run `make ci` and fix anything that fails. Iterate until it passes.
+            5. Open a pull request to `main` whose body begins with
+               "Closes #${{ github.event.issue.number }}" and summarizes the change.
+
+            HARD RULES — do not violate:
+            - NEVER merge the PR. NEVER deploy. A human reviews and merges.
+            - If you are blocked, the requirement is unclear, or `make ci` cannot be
+              made to pass: STOP. Do NOT open a PR. Instead, comment on issue
+              #${{ github.event.issue.number }} explaining exactly what is blocking,
+              and add the `needs-human` label. This is the escalation path.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
