@@ -1,0 +1,55 @@
+name: Release
+
+# Reusable RELEASE pipeline — separate from CI. A project calls this from a
+# workflow triggered by pushing a version tag (vMAJOR.MINOR.PATCH). It builds the
+# project, then publishes a GitHub Release with auto-generated notes (from merged
+# PRs since the last tag) and any build artifacts attached.
+#
+#   jobs:
+#     release:
+#       uses: manaksu/sdlc-templates/.github/workflows/release.yml@v1
+#       with:
+#         artifact_glob: "dist/*"      # optional; omit for a notes-only release
+#
+# PREREQUISITE: the repo's default workflow token must allow writes
+# (Settings → Actions → General → Workflow permissions → "Read and write"),
+# because creating a release writes to the repo. A read-only token cannot do it.
+
+on:
+  workflow_call:
+    inputs:
+      artifact_glob:
+        description: "Glob of files to attach to the release (empty = notes only)"
+        type: string
+        default: ""
+
+permissions:
+  contents: write     # required to create the release
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0          # full history so release notes can diff tags
+
+      - name: Build
+        run: make build
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          FILES=""
+          if [ -n "${{ inputs.artifact_glob }}" ]; then
+            FILES=$(ls ${{ inputs.artifact_glob }} 2>/dev/null || true)
+          fi
+          if [ -n "$FILES" ]; then
+            echo "Attaching artifacts: $FILES"
+            gh release create "$TAG" $FILES --title "$TAG" --generate-notes
+          else
+            echo "No artifacts matched — creating a notes-only release"
+            gh release create "$TAG" --title "$TAG" --generate-notes
+          fi
