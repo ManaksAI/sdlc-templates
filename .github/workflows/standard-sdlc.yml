@@ -22,9 +22,9 @@ on:
         type: string
         default: "python"
 
-permissions:
-  contents: read
-  security-events: write
+# No top-level permissions: the default pipeline runs on a read-only token so it
+# works on any repo with zero settings changes. Only the optional CodeQL job
+# requests elevated permissions (see the `sast` job).
 
 jobs:
   # ───────────── PARALLEL GROUP 1: static quality ─────────────
@@ -85,6 +85,10 @@ jobs:
   sast:
     if: ${{ inputs.enable_codeql }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write     # CodeQL needs this; enabling it also requires
+                                 # the repo's default workflow token to allow writes
     steps:
       - uses: actions/checkout@v4
       - uses: github/codeql-action/init@v3
