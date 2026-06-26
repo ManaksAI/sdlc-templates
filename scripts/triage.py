@@ -84,6 +84,12 @@ SENSITIVE = {"sensitive", "security", "infra", "payments"}
 sensitive_label = bool(SENSITIVE.intersection(labels))
 needs = bool(a["needs_human_review"]) or a["risk_level"] == "high" or sensitive_label
 
+# Human-approval override: if a reviewer has added the `approved` label, the gate
+# opens regardless of the analysis — the human has signed off. This turns
+# "needs review" from a dead end into a checkpoint.
+approved = "approved" in labels
+needs_effective = needs and not approved
+
 reasons = list(a["reasons"])
 if a["risk_level"] == "high":
     reasons.append("risk_level=high (auto-gate)")
@@ -108,8 +114,8 @@ comment = f"""## 🤖 Automated analysis
 **Proposed stories**
 {md(a['proposed_stories'])}
 
-**Risk:** `{a['risk_level']}` · **Human review required:** {'YES' if needs else 'no'}
-{md(reasons) if needs else ''}
+**Risk:** `{a['risk_level']}` · **Human review required:** {'YES' if needs_effective else ('no (human-approved)' if approved and needs else 'no')}
+{md(reasons) if needs_effective else ''}
 
 _Draft for human review — model `{MODEL}`._"""
 
@@ -120,19 +126,32 @@ def gh(*args, check=True):
 
 gh("issue", "comment", ISSUE, "--body", comment)
 
-if needs:
-    # Label may not exist yet; create-if-missing, then apply.
+if needs_effective:
+    # Ensure both labels exist so the reviewer has the `approved` button available.
     subprocess.run(
         ["gh", "label", "create", "needs-human", "--color", "B60205",
          "--description", "Automated pipeline paused — human action required",
          "--repo", REPO],
         check=False,
     )
+    subprocess.run(
+        ["gh", "label", "create", "approved", "--color", "0E8A16",
+         "--description", "Human approved — let the pipeline implement",
+         "--repo", REPO],
+        check=False,
+    )
     gh("issue", "edit", ISSUE, "--add-label", "needs-human", check=False)
     gh("issue", "comment", ISSUE,
-       "--body", "⚠️ **Human review required before automated implementation — pipeline paused.**")
+       "--body", "⚠️ **Human review required — pipeline paused.** Review the analysis above. "
+                 "If it looks right, add the **`approved`** label to let the Developer agent proceed; "
+                 "otherwise edit the requirement and re-toggle the `requirement` label.")
+elif approved and needs:
+    # Human overrode the gate — clear the paused flag and note it.
+    gh("issue", "edit", ISSUE, "--remove-label", "needs-human", check=False)
+    gh("issue", "comment", ISSUE,
+       "--body", "✅ **Human-approved** — gate overridden, proceeding to implementation.")
 
 with open(os.environ["GITHUB_OUTPUT"], "a") as f:
-    f.write(f"proceed={'false' if needs else 'true'}\n")
+    f.write(f"proceed={'false' if needs_effective else 'true'}\n")
 
 print(f"proceed={'false' if needs else 'true'} (needs_human_review={needs})")
