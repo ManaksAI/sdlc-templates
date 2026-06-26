@@ -31,10 +31,11 @@ on:
         type: string
         default: "claude-opus-4-8"
 
-permissions:
-  contents: write
-  issues: write
-  pull-requests: write
+# No explicit `permissions:` block. This workflow needs write (comment/label/branch/PR),
+# but DECLARING the request is validated at workflow STARTUP and fails on repos where the
+# grant can't be satisfied — the same startup_failure that bit CodeQL. Instead we rely on
+# the caller repo's DEFAULT workflow token, which must be set to "Read and write"
+# (org default on ManaksAI). With a write default, the jobs get write automatically.
 
 jobs:
   # ───────────── 1. ANALYZE + decide if a human is needed ─────────────
