@@ -84,7 +84,12 @@ jobs:
           fetch-depth: 0
       - uses: anthropics/claude-code-action@v1
         with:
-          claude_args: "--model ${{ inputs.model }}"
+          # Grant the tools the agent needs to read the repo, edit files, and run
+          # git/gh to branch + commit + open the PR. Without --allowedTools every
+          # Bash/Edit/Write is denied and the agent can't actually act.
+          claude_args: |
+            --model ${{ inputs.model }}
+            --allowedTools Bash,Edit,Read,Write,Glob,Grep
           prompt: |
             You are the implementation stage of an automated SDLC pipeline for
             issue #${{ github.event.issue.number }} in ${{ github.repository }}.
