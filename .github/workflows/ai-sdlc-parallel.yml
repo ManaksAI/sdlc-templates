@@ -8,9 +8,12 @@ name: AI SDLC (parallel)
 #   2. plan   : scripts/plan.py — decompose into independent, file-fenced slices, write the
 #               ownership map (.wave/ownership.json), post the plan, and STOP for human review.
 #
-# The autonomous fan-out (build matrix → integrate → consolidate) is intentionally NOT wired up
-# yet — it is scaffolded as commented YAML at the bottom of this file. Enable it deliberately,
-# per repo, only after the plan output has proven sound on real requirements (PLAYBOOK §8).
+#   3. build  : (opt-in via auto_implement) fan out one claude-code-action agent per slice,
+#               each fenced to its `owns` globs, each opening its OWN pull request.
+#
+# The integrate + defect-triage loop (merge slices → run CI → route failures to owners) is the
+# NEXT increment — still scaffolded as commented YAML at the bottom. AI never merges/deploys;
+# a human reviews and merges the per-slice PRs.
 #
 # PREREQUISITES on the caller repo (same as ai-sdlc.yml):
 #   • secret ANTHROPIC_API_KEY (via `secrets: inherit`)
@@ -31,6 +34,10 @@ on:
         description: "Ref of sdlc-templates to load triage.py / plan.py from"
         type: string
         default: "v1"
+      auto_implement:
+        description: "Fan out parallel build agents (one PR per slice) after planning"
+        type: boolean
+        default: false
 
 # No top-level permissions block — relies on the caller's default token (must be read/write).
 # Declaring permissions here would be validated at startup and fail read-only repos.
@@ -109,35 +116,63 @@ jobs:
           path: .wave/ownership.json
           if-no-files-found: ignore
 
+  # ───────────── 3. BUILD: one fenced agent per slice (opt-in), each opens a PR ─────────────
+  build:
+    needs: plan
+    if: ${{ inputs.auto_implement && needs.plan.outputs.parallelizable == 'true' }}
+    strategy:
+      fail-fast: false
+      max-parallel: ${{ inputs.max_sandboxes }}
+      matrix:
+        slice: ${{ fromJSON(needs.plan.outputs.slices) }}
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write        # claude-code-action authenticates via OIDC
+      contents: write        # create the slice branch / commit
+      pull-requests: write   # open the slice PR
+      issues: write          # comment on escalation
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_args: |
+            --model ${{ inputs.model }}
+            --allowedTools Bash,Edit,Read,Write,Glob,Grep
+          prompt: |
+            You are ONE sandbox in a parallel build of issue #${{ github.event.issue.number }}
+            ("${{ github.event.issue.title }}") in ${{ github.repository }}.
+            Build ONLY the "${{ matrix.slice.name }}" slice.
+
+            Goal: ${{ matrix.slice.goal }}
+            Done when: ${{ matrix.slice.done }}
+
+            FENCE — you may create or modify ONLY these paths:
+              ${{ join(matrix.slice.owns, ', ') }}
+            Every other file is READ-ONLY. If you genuinely need to change a file outside this
+            fence, STOP and comment on issue #${{ github.event.issue.number }} explaining why —
+            do NOT reach across (that is a planning error to escalate, not to work around).
+
+            Steps, in order:
+            1. Create and switch to a new branch: ${{ matrix.slice.branch }}
+            2. Implement the slice within the fence. Add unit tests covering standard, positive,
+               negative, and edge cases.
+            3. Run `make ci` and fix what you can within your fence. If it cannot pass because of
+               something outside your fence, note that clearly in the PR body.
+            4. Open a pull request to `main` titled
+               "Part of #${{ github.event.issue.number }}: ${{ matrix.slice.name }}", with a body
+               that starts with "Part of #${{ github.event.issue.number }}" (NOT "Closes" — this
+               is one of several parallel slices) and summarizes what you built.
+
+            HARD RULES: NEVER merge. NEVER deploy. Stay strictly inside your fence.
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+
 # ════════════════════════════════════════════════════════════════════════════════════════
-# EXPERIMENTAL — autonomous fan-out. NOT enabled. Verify the plan phase on real requirements
-# first, then turn these on per repo behind an explicit input (e.g. auto_implement). Each job
-# below is sketched against the design in SANDBOX-ORCHESTRATOR.md; the matrix fans out one
-# claude-code-action runner per slice, fenced to that slice's `owns` globs.
-#
-#   build:
-#     needs: plan
-#     if: ${{ inputs.auto_implement && needs.plan.outputs.parallelizable == 'true' }}
-#     strategy:
-#       fail-fast: false
-#       max-parallel: ${{ inputs.max_sandboxes }}
-#       matrix:
-#         slice: ${{ fromJSON(needs.plan.outputs.slices) }}
-#     runs-on: ubuntu-latest
-#     permissions: { id-token: write, contents: write, pull-requests: write, issues: write }
-#     steps:
-#       - uses: actions/checkout@v4
-#         with: { fetch-depth: 0 }
-#       - uses: anthropics/claude-code-action@v1
-#         with:
-#           claude_args: --model ${{ inputs.model }} --allowedTools Bash,Edit,Read,Write,Glob,Grep
-#           prompt: |
-#             Implement ONLY the "${{ matrix.slice.name }}" slice on branch
-#             ${{ matrix.slice.branch }}. You may write ONLY: ${{ toJson(matrix.slice.owns) }}.
-#             Treat every other file as read-only. Add unit tests (standard/positive/negative/
-#             edge). Run `make ci`. Push the branch. Do NOT open a PR, do NOT merge.
-#             If you need a file outside your fence, STOP and comment — do not reach across.
-#         env: { ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }} }
+# NEXT INCREMENT (still scaffolding) — integrate + defect-triage. Turn on after the build
+# fan-out proves out. Merges the per-slice branches, runs the full suite, and routes failures
+# to the owning sandbox via scripts/triage-owner.mjs against .wave/ownership.json.
 #
 #   integrate:
 #     needs: build
